@@ -1,18 +1,18 @@
 {
     'name': 'WB Tech Fulfillment Process',
     'version': '18.0.1.0.0',
-    'summary': 'Propagación de marketplace entre PFUL y DFUL en el proceso de fulfillment',
+    'summary': 'Control de consolidación 1:1 y propagación de marketplace en fulfillment',
     'description': '''
-        Gestiona la lógica de negocio específica del proceso de fulfillment:
-        - Cuando se crea un DFUL (Resurtido a Ful: Despacho), propaga la
-          ubicación de marketplace desde/hacia el PFUL (Resurtido a Ful: Pick)
-          que lo originó.
-        - Ajusta location_dest_id de los moves del DFUL al marketplace correcto.
+        Módulo para Odoo 18 Enterprise que:
+        - Permite prevenir la consolidación de movimientos de stock (Relación 1:1 PFUL-DFUL).
+        - Añade configuración por tipo de operación (prevent_consolidation).
+        - Propaga la ubicación de marketplace entre recolección y despacho.
     ''',
     'author': 'Wonderbrands Tech',
     'category': 'Inventory',
     'depends': ['stock', 'wmds'],
     'data': [
+        'views/stock_picking_type_views.xml',
         'views/fulfillment_picking_views.xml',
     ],
     'installable': True,
