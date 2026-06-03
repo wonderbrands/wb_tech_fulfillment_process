@@ -1,46 +1,75 @@
-# WB Tech Fulfillment Process (Odoo 18)
+# WB Tech Fulfillment Process
 
-Este módulo especializado para Odoo 18 Enterprise gestiona la integridad de los flujos de resurtido a Marketplaces (Fulfillment), garantizando una trazabilidad 1:1 entre las etapas de recolección (Pick) y despacho (Dispatch).
+Módulo para Odoo 18 que gestiona la propagación de la ubicación de marketplace entre operaciones **PFUL** (Resurtido a Ful: Pick) y **DFUL** (Resurtido a Ful: Despacho) en el proceso de fulfillment.
 
-## 1. Funcionalidades Principales
+## Funcionalidades
 
-### A. Control de Consolidación 1:1
-Por defecto, Odoo intenta optimizar el inventario agrupando múltiples movimientos en un solo albarán (Picking) o fusionando líneas del mismo producto. Este módulo permite anular ese comportamiento para operaciones críticas donde cada paquete o envío debe ser tratado de forma individual e independiente.
+### 1. Propagación de `marketplace_location`
 
-*   **Evita la fusión de líneas:** Si envías 10 unidades del Producto A en dos momentos distintos, se mantendrán como dos líneas separadas.
-*   **Forza Albaranes Individuales:** Cada movimiento de stock generará su propio documento de transferencia (DFUL), evitando que se mezclen pedidos de diferentes orígenes.
+Cuando se valida un PFUL y Odoo crea automáticamente el DFUL:
 
-### B. Propagación de Ubicación de Marketplace
-Automatiza la sincronización de la ubicación de destino final entre los pasos de la ruta de fulfillment:
-*   Si el despacho (DFUL) tiene definida una ubicación (ej: MLSR/Existencias), esta se propaga al registro de recolección (PFUL) original.
-*   Asegura que todos los movimientos de stock internos apunten al marketplace correcto de forma automática.
+- **PFUL → DFUL:** Si el PFUL tiene definida una **Ubicación del marketplace**, esta se propaga automáticamente como ubicación de destino (`location_dest_id`) del DFUL y de todos sus movimientos.
+- **DFUL → PFUL:** Si el PFUL no tiene definida una ubicación de marketplace, se toma la ubicación de destino que trae el DFUL (desde la ruta/configuración) y se propaga al PFUL como `marketplace_location`.
 
-## 2. Configuración para el Usuario
+### 2. Relación 1:1 entre PFUL y DFUL
 
-Para activar estas funciones, siga estos pasos:
+Por defecto Odoo consolida múltiples PFUL en un solo DFUL. Este módulo evita esa consolidación, garantizando que **cada PFUL genere su propio DFUL**.
 
-1.  Vaya a **Inventario > Configuración > Tipos de Operación**.
-2.  Busque y seleccione el tipo de operación donde desea evitar la agrupación (ejemplo: **Resurtido a Ful: Despacho** o **DFUL**).
-3.  En la pestaña de **Configuración**, localice el campo **"Prevenir Consolidación de Transferencias"**.
-4.  Active el check (True).
-5.  Guarde los cambios.
+Esto se controla mediante el flag **"No consolidar destinos"** disponible en el formulario del tipo de operación.
 
-*Nota: Todas las operaciones que tengan este check desactivado seguirán funcionando con la lógica estándar de Odoo.*
+### 3. Campo visible en PFUL
 
-## 3. Flujo de Trabajo (Operación)
+El campo **"Ubicación del marketplace"** se muestra en el formulario del PFUL, permitiendo al usuario definir manualmente la ubicación de destino que se propagará al DFUL.
 
-1.  Al validar un **PFUL (Pick)**, Odoo genera automáticamente el **DFUL (Dispatch)** vinculado.
-2.  Gracias a este módulo, el DFUL se creará como un documento único, incluso si hay otros despachos pendientes hacia el mismo destino.
-3.  La ubicación del Marketplace se mostrará en el formulario del albarán para una validación rápida.
-4.  Cualquier cambio en la ubicación de destino del despacho actualizará automáticamente los registros vinculados y quedará registrado en el log del sistema (**WMDS Log**).
+## Configuración
 
-## 4. Requisitos Técnicos
+1. Ve a **Inventario → Configuración → Tipos de operación**
+2. Abre el tipo de operación **"Resurtido a Ful: Despacho"** (o el que uses como DFUL)
+3. Activa el flag **"No consolidar destinos"** en la pestaña General
+4. Guarda los cambios
 
-*   **Odoo Version:** 18.0 Enterprise / Community.
-*   **Dependencias:** 
-    *   `stock`: Módulo base de inventario.
-    *   `wmds`: Sistema de logs y trazabilidad de Wonderbrands.
+> El flag también puede activarse en el tipo de operación **"Resurtido a Ful: Pick"** (PFUL) — el módulo lo detecta desde cualquiera de los dos lados.
 
-## 5. Seguridad y Aislamiento
+## Uso
 
-Este desarrollo ha sido diseñado bajo el principio de **"No Interferencia"**. El código solo se ejecuta si detecta que el Tipo de Operación tiene activado el flag de prevención. No afecta procesos de Ventas, Compras o Manufactura estándar a menos que se configure explícitamente para ello.
+### Flujo básico
+
+1. Crea un PFUL (Resurtido a Ful: Pick)
+2. Opcionalmente, define **"Ubicación del marketplace"** en el PFUL
+3. Valida el PFUL
+4. El módulo crea automáticamente un DFUL (Resurtido a Ful: Despacho) con:
+   - La ubicación de marketplace del PFUL como ubicación de destino
+   - Relación 1:1 (un DFUL por cada PFUL)
+
+### Sin marketplace definido
+
+Si el PFUL no tiene definida una ubicación de marketplace:
+- El DFUL se crea con la ubicación de destino configurada en la ruta
+- Esa ubicación se propaga al PFUL como `marketplace_location`
+
+## Dependencias
+
+- `stock` — Módulo base de inventario
+- `wmds` — Módulo interno de Wonderbrands Tech (logs)
+
+## Technical Reference
+
+### Modelos
+
+| Clase | Modelo | Descripción |
+|---|---|---|
+| `FulfillmentPicking` | `stock.picking` | Agrega campo `marketplace_location` y `picking_type_id_name` |
+| `StockPickingType` | `stock.picking.type` | Agrega flag `no_merge_destination` |
+| `FulfillmentStockMove` | `stock.move` | Lógica de separación 1:1 y propagación de marketplace |
+
+### Métodos sobrescritos
+
+- **`stock.move._key_assign_picking()`** — Incluye los IDs de los pickings origen en la clave de agrupamiento para evitar consolidación
+- **`stock.move._search_picking_for_assignation()`** — Rechaza pickings existentes con orígenes diferentes cuando el flag `no_merge_destination` está activo
+- **`stock.move._assign_picking_post_process()`** — Propaga `marketplace_location` entre PFUL y DFUL después de asignar los movimientos al nuevo picking
+
+## Versiones
+
+| Versión | Cambios |
+|---|---|
+| 18.0.1.0.0 | Versión inicial |
