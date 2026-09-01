@@ -1,4 +1,5 @@
-from odoo import models, fields, api
+from odoo import models, fields, api, _
+from odoo.exceptions import UserError
 
 # Nombres de los tipos de operación del flujo de fulfillment.
 # El emparejamiento por nombre es frágil (renombrar el tipo desde la interfaz
@@ -6,6 +7,11 @@ from odoo import models, fields, api
 # adelante por un campo propio en stock.picking.type.
 FUL_PICK_TYPE = 'Resurtido a Ful: Pick'
 FUL_DISPATCH_TYPE = 'Resurtido a Ful: Despacho'
+
+CLOSED_STATE_LABELS = {
+    'done': 'validado',
+    'cancel': 'cancelado',
+}
 
 
 class FulfillmentPicking(models.Model):
@@ -28,6 +34,31 @@ class FulfillmentPicking(models.Model):
     @api.model
     def create(self, vals):
         return super(FulfillmentPicking, self).create(vals)
+
+    def _ful_backorder_root(self):
+        """Retorna el albarán original del que desciende este backorder.
+
+        Odoo encadena `backorder_id` cada vez que se valida parcialmente, así que
+        subir hasta la raíz da el identificador del trabajo completo: el PFUL tal
+        como se planeó, sin importar en cuántas partes se acabe surtiendo.
+        """
+        self.ensure_one()
+        picking = self
+        seen = set()
+        while picking.backorder_id and picking.backorder_id.id not in seen:
+            seen.add(picking.id)
+            picking = picking.backorder_id
+        return picking
+
+    def _ful_backorder_family(self):
+        """Retorna la cadena completa de backorders: la raíz y sus descendientes."""
+        family = self.browse()
+        for picking in self:
+            frontier = picking._ful_backorder_root()
+            while frontier:
+                family |= frontier
+                frontier = frontier.backorder_ids - family
+        return family
 
 
 class StockPickingType(models.Model):
@@ -59,6 +90,26 @@ class FulfillmentStockMove(models.Model):
             lambda p: FUL_PICK_TYPE in (p.picking_type_id.name or '')
         )
 
+    def _ful_origin_root_ids(self):
+        """IDs de los albaranes raíz que originan estos movimientos.
+
+        Se agrupa por la raíz de la cadena de backorders y no por el albarán
+        concreto, para que un PFUL surtido en varias partes alimente siempre el
+        mismo DFUL en lugar de abrir uno nuevo por cada backorder.
+        """
+        return tuple(sorted({
+            picking._ful_backorder_root().id
+            for picking in self.move_orig_ids.picking_id
+        }))
+
+    def _ful_closed_sibling_dispatches(self):
+        """DFUL ya cerrados generados por la misma cadena de PFUL que estos moves."""
+        family = self.move_orig_ids.picking_id._ful_backorder_family()
+        dispatches = family.move_ids.move_dest_ids.picking_id.filtered(
+            lambda p: FUL_DISPATCH_TYPE in (p.picking_type_id.name or '')
+        )
+        return dispatches.filtered(lambda p: p.state in CLOSED_STATE_LABELS)
+
     @staticmethod
     def _merge_ful_origin(current, new_values):
         """Une documentos origen en una cadena separada por comas, sin duplicados
@@ -73,19 +124,46 @@ class FulfillmentStockMove(models.Model):
     def _key_assign_picking(self):
         keys = super()._key_assign_picking()
         if self._split_by_origin():
-            orig_picking_ids = tuple(sorted(set(
-                self.move_orig_ids.mapped('picking_id').ids
-            )))
-            keys += (orig_picking_ids,)
+            keys += (self._ful_origin_root_ids(),)
         return keys
+
+    def _search_picking_for_assignation_domain(self):
+        domain = super()._search_picking_for_assignation_domain()
+        if not self._split_by_origin():
+            return domain
+        # Que la hoja del DFUL ya se haya impreso no lo vuelve un destino
+        # equivocado para el backorder: preferimos agregarle los movimientos y
+        # reimprimir, antes que abrir un segundo DFUL para la misma cita.
+        return [
+            leaf for leaf in domain
+            if not (isinstance(leaf, (list, tuple)) and len(leaf) == 3 and leaf[0] == 'printed')
+        ]
 
     def _search_picking_for_assignation(self):
         picking = super()._search_picking_for_assignation()
-        if picking and self._split_by_origin():
-            existing_origins = picking.move_ids.move_orig_ids.picking_id
-            new_origins = self.move_orig_ids.picking_id
-            if existing_origins and new_origins and existing_origins != new_origins:
-                return self.env['stock.picking']
+        if not self._split_by_origin():
+            return picking
+        roots = self._ful_origin_root_ids()
+        if picking:
+            existing_roots = picking.move_ids._ful_origin_root_ids()
+            if existing_roots and roots and existing_roots != roots:
+                picking = self.env['stock.picking']
+        if picking:
+            return picking
+
+        # Sin DFUL reutilizable: si el de esta cadena ya se cerró, el backorder
+        # no tiene a dónde ir y crear otro DFUL rompería el 1:1 con la cita.
+        closed = self._ful_closed_sibling_dispatches()
+        if closed:
+            dispatch = closed[0]
+            raise UserError(_(
+                "El despacho %(dispatch)s, generado por este mismo Pick, ya está "
+                "%(state)s, así que las piezas del backorder no pueden agregarse a él.\n\n"
+                "Solicita a sistemas revertir o reabrir %(dispatch)s antes de validar."
+            ) % {
+                'dispatch': dispatch.name,
+                'state': CLOSED_STATE_LABELS[dispatch.state],
+            })
         return picking
 
     def _assign_picking_post_process(self, new=False):
@@ -110,6 +188,13 @@ class FulfillmentStockMove(models.Model):
             self.env['wmds.log'].sudo().create({
                 'pick': picking.id,
                 'log': f"Origen vinculado desde PFUL: {origin}",
+                'user': self.env.user.id,
+            })
+
+        if not new:
+            self.env['wmds.log'].sudo().create({
+                'pick': picking.id,
+                'log': "Backorder agregado al despacho: %s" % ', '.join(pful_pick.mapped('name')),
                 'user': self.env.user.id,
             })
 
