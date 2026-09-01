@@ -52,9 +52,9 @@ lugar de abrir uno nuevo.
 - Dos PFUL distintos que **no** estén encadenados por backorder siguen generando DFUL distintos,
   aunque compartan número de cita.
 
-> ⚠️ Si el DFUL de esa cadena ya fue **validado o cancelado**, el backorder no tiene a dónde ir y la
-> validación se **bloquea** con un error que nombra el despacho. Es intencional: evita un segundo
-> DFUL para la misma cita. Requiere que sistemas revierta o reabra ese despacho.
+> ℹ️ Si el DFUL de esa cadena ya fue **validado o cancelado**, el backorder no puede agregarse a él.
+> En ese caso **se crea un DFUL nuevo** — la mercancía nunca se queda detenida — y se deja aviso en
+> el chatter del despacho y en `wmds.log` indicando que la cita quedó repartida en dos despachos.
 
 ### 5. Campo visible en PFUL
 
@@ -104,7 +104,7 @@ Si el PFUL no tiene definida una ubicación de marketplace:
 ### Métodos sobrescritos
 
 - **`stock.move._key_assign_picking()`** — Incluye los IDs de los pickings origen en la clave de agrupamiento para evitar consolidación
-- **`stock.move._search_picking_for_assignation()`** — Rechaza pickings existentes con orígenes diferentes cuando el flag `no_merge_destination` está activo, y bloquea la validación si el DFUL de la cadena ya está cerrado
+- **`stock.move._search_picking_for_assignation()`** — Rechaza pickings existentes con orígenes diferentes cuando el flag `no_merge_destination` está activo
 - **`stock.move._search_picking_for_assignation_domain()`** — Permite reutilizar un DFUL ya impreso (elimina la condición `printed = False` de Odoo) en este flujo
 - **`stock.move._assign_picking_post_process()`** — Propaga `origin` y `marketplace_location` entre PFUL y DFUL después de asignar los movimientos, tanto si el DFUL se acaba de crear como si se le agregaron movimientos
 
@@ -124,6 +124,6 @@ Los nombres de los tipos de operación están centralizados en las constantes `F
 
 | Versión | Cambios |
 |---|---|
-| 18.0.1.2.0 | Los backorders de un PFUL se agrupan en el DFUL original (agrupamiento por raíz de backorder); se reutiliza el DFUL aunque esté impreso; se bloquea la validación si ese DFUL ya está cerrado |
+| 18.0.1.2.0 | Los backorders de un PFUL se agrupan en el DFUL original (agrupamiento por raíz de backorder); se reutiliza el DFUL aunque esté impreso; si ese DFUL ya está cerrado se abre uno nuevo y se avisa |
 | 18.0.1.1.0 | Propagación de `origin` (número de cita) del PFUL al DFUL; la propagación ahora también ocurre al agregar movimientos a un DFUL existente (antes solo al crearlo) |
 | 18.0.1.0.0 | Versión inicial |

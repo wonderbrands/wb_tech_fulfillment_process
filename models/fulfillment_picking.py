@@ -1,5 +1,4 @@
-from odoo import models, fields, api, _
-from odoo.exceptions import UserError
+from odoo import models, fields, api
 
 # Nombres de los tipos de operación del flujo de fulfillment.
 # El emparejamiento por nombre es frágil (renombrar el tipo desde la interfaz
@@ -148,22 +147,6 @@ class FulfillmentStockMove(models.Model):
             existing_roots = picking.move_ids._ful_origin_root_ids()
             if existing_roots and roots and existing_roots != roots:
                 picking = self.env['stock.picking']
-        if picking:
-            return picking
-
-        # Sin DFUL reutilizable: si el de esta cadena ya se cerró, el backorder
-        # no tiene a dónde ir y crear otro DFUL rompería el 1:1 con la cita.
-        closed = self._ful_closed_sibling_dispatches()
-        if closed:
-            dispatch = closed[0]
-            raise UserError(_(
-                "El despacho %(dispatch)s, generado por este mismo Pick, ya está "
-                "%(state)s, así que las piezas del backorder no pueden agregarse a él.\n\n"
-                "Solicita a sistemas revertir o reabrir %(dispatch)s antes de validar."
-            ) % {
-                'dispatch': dispatch.name,
-                'state': CLOSED_STATE_LABELS[dispatch.state],
-            })
         return picking
 
     def _assign_picking_post_process(self, new=False):
@@ -197,6 +180,22 @@ class FulfillmentStockMove(models.Model):
                 'log': "Backorder agregado al despacho: %s" % ', '.join(pful_pick.mapped('name')),
                 'user': self.env.user.id,
             })
+        else:
+            # No se pudo reutilizar el DFUL de la cadena porque ya está cerrado.
+            # Se abre uno nuevo (la mercancía no puede quedarse detenida) y se
+            # avisa, porque la cita queda repartida en dos despachos.
+            closed = self._ful_closed_sibling_dispatches() - picking
+            if closed:
+                aviso = (
+                    "Este despacho se creó aparte: el despacho %s de la misma cita ya está %s, "
+                    "así que el backorder no pudo agregarse a él. La cita queda en dos despachos."
+                ) % (closed[0].name, CLOSED_STATE_LABELS[closed[0].state])
+                picking.message_post(body=aviso)
+                self.env['wmds.log'].sudo().create({
+                    'pick': picking.id,
+                    'log': aviso,
+                    'user': self.env.user.id,
+                })
 
         first_pful = pful_pick[0]
         if first_pful.marketplace_location:
