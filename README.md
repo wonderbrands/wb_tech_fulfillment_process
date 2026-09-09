@@ -35,7 +35,28 @@ Por defecto Odoo consolida múltiples PFUL en un solo DFUL. Este módulo evita e
 
 Esto se controla mediante el flag **"No consolidar destinos"** disponible en el formulario del tipo de operación.
 
-### 4. Campo visible en PFUL
+La relación 1:1 se calcula contra el **PFUL raíz**, no contra el albarán concreto: si un PFUL se
+surte en varias partes, sus backorders se agrupan en el **mismo DFUL** (ver siguiente sección).
+
+### 4. Backorders del PFUL agrupados en un solo DFUL
+
+Un PFUL puede surtirse en partes sin saturar la operación: cuando se valida parcialmente, Odoo crea
+un backorder con el resto, y ese backorder alimenta el **mismo DFUL** que la primera validación en
+lugar de abrir uno nuevo.
+
+- El agrupamiento usa la **raíz de la cadena de backorders** (`backorder_id` recorrido hasta arriba),
+  así que da igual en cuántas partes se surta el PFUL.
+- El DFUL **crece después de creado**: al validar cada backorder se le suman las piezas y Odoo
+  fusiona las líneas del mismo producto. Un DFUL abierto en pantalla cambiará de cantidades.
+- Se reutiliza el DFUL **aunque su hoja ya se haya impreso**; en ese caso hay que **reimprimir**.
+- Dos PFUL distintos que **no** estén encadenados por backorder siguen generando DFUL distintos,
+  aunque compartan número de cita.
+
+> ℹ️ Si el DFUL de esa cadena ya fue **validado o cancelado**, el backorder no puede agregarse a él.
+> En ese caso **se crea un DFUL nuevo** — la mercancía nunca se queda detenida — y se deja aviso en
+> el chatter del despacho y en `wmds.log` indicando que la cita quedó repartida en dos despachos.
+
+### 5. Campo visible en PFUL
 
 El campo **"Ubicación del marketplace"** se muestra en el formulario del PFUL, permitiendo al usuario definir manualmente la ubicación de destino que se propagará al DFUL.
 
@@ -84,12 +105,17 @@ Si el PFUL no tiene definida una ubicación de marketplace:
 
 - **`stock.move._key_assign_picking()`** — Incluye los IDs de los pickings origen en la clave de agrupamiento para evitar consolidación
 - **`stock.move._search_picking_for_assignation()`** — Rechaza pickings existentes con orígenes diferentes cuando el flag `no_merge_destination` está activo
+- **`stock.move._search_picking_for_assignation_domain()`** — Permite reutilizar un DFUL ya impreso (elimina la condición `printed = False` de Odoo) en este flujo
 - **`stock.move._assign_picking_post_process()`** — Propaga `origin` y `marketplace_location` entre PFUL y DFUL después de asignar los movimientos, tanto si el DFUL se acaba de crear como si se le agregaron movimientos
 
 ### Auxiliares
 
 - **`stock.move._ful_source_pickings()`** — Retorna los PFUL que originan los movimientos, vía `move_orig_ids.picking_id`
 - **`stock.move._merge_ful_origin(current, new_values)`** — Une documentos origen separados por comas, sin duplicados y conservando los existentes
+- **`stock.move._ful_origin_root_ids()`** — IDs de los PFUL raíz que originan los movimientos; es la clave de agrupamiento del DFUL
+- **`stock.move._ful_closed_sibling_dispatches()`** — DFUL ya validados o cancelados generados por la misma cadena de PFUL
+- **`stock.picking._ful_backorder_root()`** — Sube por `backorder_id` hasta el albarán original (con guarda contra ciclos)
+- **`stock.picking._ful_backorder_family()`** — La cadena completa de backorders: la raíz y todos sus descendientes
 
 Los nombres de los tipos de operación están centralizados en las constantes `FUL_PICK_TYPE` y
 `FUL_DISPATCH_TYPE` de `models/fulfillment_picking.py`.
@@ -98,5 +124,6 @@ Los nombres de los tipos de operación están centralizados en las constantes `F
 
 | Versión | Cambios |
 |---|---|
+| 18.0.1.2.0 | Los backorders de un PFUL se agrupan en el DFUL original (agrupamiento por raíz de backorder); se reutiliza el DFUL aunque esté impreso; si ese DFUL ya está cerrado se abre uno nuevo y se avisa |
 | 18.0.1.1.0 | Propagación de `origin` (número de cita) del PFUL al DFUL; la propagación ahora también ocurre al agregar movimientos a un DFUL existente (antes solo al crearlo) |
 | 18.0.1.0.0 | Versión inicial |

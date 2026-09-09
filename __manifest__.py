@@ -1,6 +1,6 @@
 {
     'name': 'WB Tech Fulfillment Process',
-    'version': '18.0.1.1.0',
+    'version': '18.0.1.2.0',
     'summary': 'Propagación de marketplace y documento origen entre PFUL y DFUL',
     'description': '''
         Gestiona la lógica de negocio específica del proceso de fulfillment:
@@ -10,6 +10,8 @@
         - Ajusta location_dest_id de los moves del DFUL al marketplace correcto.
         - Propaga el documento origen (número de cita del marketplace) del PFUL
           al DFUL, para que ambos queden ligados por el mismo identificador.
+        - Agrupa los backorders de un mismo PFUL en el DFUL original, para
+          poder surtir el Pick en partes sin abrir un despacho por parte.
     ''',
     'author': 'Wonderbrands Tech',
     'category': 'Inventory',
