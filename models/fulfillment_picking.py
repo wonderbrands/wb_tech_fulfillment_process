@@ -1,4 +1,6 @@
 from odoo import models, fields, api
+from odoo.osv import expression
+
 
 # Nombres de los tipos de operación del flujo de fulfillment.
 # El emparejamiento por nombre es frágil (renombrar el tipo desde la interfaz
@@ -133,10 +135,12 @@ class FulfillmentStockMove(models.Model):
         # Que la hoja del DFUL ya se haya impreso no lo vuelve un destino
         # equivocado para el backorder: preferimos agregarle los movimientos y
         # reimprimir, antes que abrir un segundo DFUL para la misma cita.
-        return [
+        clean_terms = [
             leaf for leaf in domain
-            if not (isinstance(leaf, (list, tuple)) and len(leaf) == 3 and leaf[0] == 'printed')
+            if leaf != '&' and not (isinstance(leaf, (list, tuple)) and len(leaf) == 3 and leaf[0] == 'printed')
         ]
+        return expression.normalize_domain(clean_terms)
+
 
     def _search_picking_for_assignation(self):
         picking = super()._search_picking_for_assignation()
