@@ -1,23 +1,23 @@
-# -*- coding: utf-8 -*-
 from odoo import models, fields, api
-import logging
 
-_logger = logging.getLogger(__name__)
+# Nombres de los tipos de operación del flujo de fulfillment.
+# El emparejamiento por nombre es frágil (renombrar el tipo desde la interfaz
+# rompe la lógica sin error); se centraliza aquí para poder sustituirlo más
+# adelante por un campo propio en stock.picking.type.
+FUL_PICK_TYPE = 'Resurtido a Ful: Pick'
+FUL_DISPATCH_TYPE = 'Resurtido a Ful: Despacho'
+
+CLOSED_STATE_LABELS = {
+    'done': 'validado',
+    'cancel': 'cancelado',
+}
 
 
 class FulfillmentPicking(models.Model):
     """
     Extiende stock.picking para gestionar la propagación de marketplace_location
     entre operaciones PFUL (Resurtido a Ful: Pick) y DFUL (Resurtido a Ful: Despacho).
-
-    Cuando Odoo crea un DFUL a partir de un PFUL, este override de create:
-      1. Navega de los moves del DFUL → move_orig_ids → picking PFUL origen
-      2. Si el DFUL ya tiene location_dest_id → lo propaga al PFUL como marketplace_location
-      3. Si el PFUL ya tenía marketplace_location → lo aplica al DFUL (y a su location_dest_id)
-      4. Tras el create, ajusta location_dest_id de todos los moves del DFUL al marketplace
-      5. Registra el evento en wmds.log
     """
-
     _inherit = 'stock.picking'
 
     marketplace_location = fields.Many2one(
@@ -25,55 +25,191 @@ class FulfillmentPicking(models.Model):
         string="Ubicación del marketplace",
     )
 
+    picking_type_id_name = fields.Char(
+        related='picking_type_id.name',
+        string='Tipo de operación',
+    )
+
     @api.model
     def create(self, vals):
-        # ── Lógica DFUL/PFUL: propagar marketplace_location ──────────────────
-        if 'picking_type_id' in vals:
-            picking_type = self.env['stock.picking.type'].browse(vals['picking_type_id'])
+        return super(FulfillmentPicking, self).create(vals)
 
-            if picking_type.name and 'Resurtido a Ful: Despacho' in picking_type.name:
-                pful_pick = self.env['stock.picking']
+    def _ful_backorder_root(self):
+        """Retorna el albarán original del que desciende este backorder.
 
-                # Navegar de los moves del DFUL hacia el PFUL origen vía move_orig_ids
-                if 'move_ids' in vals:
-                    orig_move_ids = []
-                    for move_cmd in vals['move_ids']:
-                        if move_cmd[0] in (0, 1) and isinstance(move_cmd[2], dict) and 'move_orig_ids' in move_cmd[2]:
-                            for orig_cmd in move_cmd[2]['move_orig_ids']:
-                                if orig_cmd[0] == 4:
-                                    orig_move_ids.append(orig_cmd[1])
-                                elif orig_cmd[0] == 6:
-                                    orig_move_ids.extend(orig_cmd[2])
+        Odoo encadena `backorder_id` cada vez que se valida parcialmente, así que
+        subir hasta la raíz da el identificador del trabajo completo: el PFUL tal
+        como se planeó, sin importar en cuántas partes se acabe surtiendo.
+        """
+        self.ensure_one()
+        picking = self
+        seen = set()
+        while picking.backorder_id and picking.backorder_id.id not in seen:
+            seen.add(picking.id)
+            picking = picking.backorder_id
+        return picking
 
-                    if orig_move_ids:
-                        pful_pick = self.env['stock.move'].sudo().browse(orig_move_ids).mapped('picking_id').filtered(
-                            lambda p: 'Resurtido a Ful: Pick' in (p.picking_type_id.name or '')
-                        )
+    def _ful_backorder_family(self):
+        """Retorna la cadena completa de backorders: la raíz y sus descendientes."""
+        family = self.browse()
+        for picking in self:
+            frontier = picking._ful_backorder_root()
+            while frontier:
+                family |= frontier
+                frontier = frontier.backorder_ids - family
+        return family
 
-                if pful_pick:
-                    first_pful = pful_pick[0]
-                    if vals.get('location_dest_id'):
-                        # DFUL tiene destino definido → propagarlo al PFUL
-                        first_pful.sudo().write({'marketplace_location': vals['location_dest_id']})
-                        vals['marketplace_location'] = vals['location_dest_id']
-                    elif first_pful.marketplace_location:
-                        # PFUL ya tenía marketplace_location → aplicarlo al DFUL
-                        vals['marketplace_location'] = first_pful.marketplace_location.id
-                        vals['location_dest_id'] = first_pful.marketplace_location.id
 
-        res = super(FulfillmentPicking, self).create(vals)
+class StockPickingType(models.Model):
+    _inherit = 'stock.picking.type'
 
-        # Tras create: sincronizar location_dest_id de los moves del DFUL al marketplace
-        if (
-            res.marketplace_location
-            and res.picking_type_id.name
-            and 'Resurtido a Ful: Despacho' in res.picking_type_id.name
-        ):
-            res.move_ids.write({'location_dest_id': res.marketplace_location.id})
+    no_merge_destination = fields.Boolean(
+        string="No consolidar destinos",
+        help="Al validar, cada albarán origen genera su propio albarán destino (1:1) "
+             "en lugar de consolidarse en uno solo.",
+    )
+
+
+class FulfillmentStockMove(models.Model):
+    _inherit = 'stock.move'
+
+    def _split_by_origin(self):
+        """Retorna True si el move debe forzar separación 1:1
+        según la configuración de su tipo de operación o del origen."""
+        self.ensure_one()
+        if not self.move_orig_ids:
+            return False
+        return self.picking_type_id.no_merge_destination or any(
+            self.move_orig_ids.mapped('picking_id.picking_type_id.no_merge_destination')
+        )
+
+    def _ful_source_pickings(self):
+        """Retorna los PFUL que originan estos movimientos."""
+        return self.move_orig_ids.picking_id.filtered(
+            lambda p: FUL_PICK_TYPE in (p.picking_type_id.name or '')
+        )
+
+    def _ful_origin_root_ids(self):
+        """IDs de los albaranes raíz que originan estos movimientos.
+
+        Se agrupa por la raíz de la cadena de backorders y no por el albarán
+        concreto, para que un PFUL surtido en varias partes alimente siempre el
+        mismo DFUL en lugar de abrir uno nuevo por cada backorder.
+        """
+        return tuple(sorted({
+            picking._ful_backorder_root().id
+            for picking in self.move_orig_ids.picking_id
+        }))
+
+    def _ful_closed_sibling_dispatches(self):
+        """DFUL ya cerrados generados por la misma cadena de PFUL que estos moves."""
+        family = self.move_orig_ids.picking_id._ful_backorder_family()
+        dispatches = family.move_ids.move_dest_ids.picking_id.filtered(
+            lambda p: FUL_DISPATCH_TYPE in (p.picking_type_id.name or '')
+        )
+        return dispatches.filtered(lambda p: p.state in CLOSED_STATE_LABELS)
+
+    @staticmethod
+    def _merge_ful_origin(current, new_values):
+        """Une documentos origen en una cadena separada por comas, sin duplicados
+        y conservando los que ya estaban."""
+        origins = [o.strip() for o in (current or '').split(',') if o.strip()]
+        for value in new_values:
+            value = (value or '').strip()
+            if value and value not in origins:
+                origins.append(value)
+        return ','.join(origins)
+
+    def _key_assign_picking(self):
+        keys = super()._key_assign_picking()
+        if self._split_by_origin():
+            keys += (self._ful_origin_root_ids(),)
+        return keys
+
+    def _search_picking_for_assignation_domain(self):
+        domain = super()._search_picking_for_assignation_domain()
+        if not self._split_by_origin():
+            return domain
+        # Que la hoja del DFUL ya se haya impreso no lo vuelve un destino
+        # equivocado para el backorder: preferimos agregarle los movimientos y
+        # reimprimir, antes que abrir un segundo DFUL para la misma cita.
+        return [
+            leaf for leaf in domain
+            if not (isinstance(leaf, (list, tuple)) and len(leaf) == 3 and leaf[0] == 'printed')
+        ]
+
+    def _search_picking_for_assignation(self):
+        picking = super()._search_picking_for_assignation()
+        if not self._split_by_origin():
+            return picking
+        roots = self._ful_origin_root_ids()
+        if picking:
+            existing_roots = picking.move_ids._ful_origin_root_ids()
+            if existing_roots and roots and existing_roots != roots:
+                picking = self.env['stock.picking']
+        return picking
+
+    def _assign_picking_post_process(self, new=False):
+        super()._assign_picking_post_process(new=new)
+        # Se ejecuta tanto al crear el DFUL como al agregarle movimientos
+        # (p. ej. al validar el backorder de un PFUL), por eso no se filtra
+        # por `new`.
+        picking = self.mapped('picking_id')
+        if len(picking) != 1 or FUL_DISPATCH_TYPE not in (picking.picking_type_id.name or ''):
+            return
+        pful_pick = self._ful_source_pickings()
+        if not pful_pick:
+            return
+
+        # El número de cita del marketplace vive en el `origin` del PFUL.
+        # En un DFUL nuevo esto sustituye el valor que arma Odoo (el nombre del
+        # PFUL); al agregar movimientos a un DFUL existente lo extiende.
+        current_origin = False if new else picking.origin
+        origin = self._merge_ful_origin(current_origin, pful_pick.mapped('origin'))
+        if origin and origin != picking.origin:
+            picking.write({'origin': origin})
             self.env['wmds.log'].sudo().create({
-                'pick': res.id,
-                'log': f"Ubicación de destino del marketplace vinculada: {res.marketplace_location.complete_name}",
+                'pick': picking.id,
+                'log': f"Origen vinculado desde PFUL: {origin}",
                 'user': self.env.user.id,
             })
 
-        return res
+        if not new:
+            self.env['wmds.log'].sudo().create({
+                'pick': picking.id,
+                'log': "Backorder agregado al despacho: %s" % ', '.join(pful_pick.mapped('name')),
+                'user': self.env.user.id,
+            })
+        else:
+            # No se pudo reutilizar el DFUL de la cadena porque ya está cerrado.
+            # Se abre uno nuevo (la mercancía no puede quedarse detenida) y se
+            # avisa, porque la cita queda repartida en dos despachos.
+            closed = self._ful_closed_sibling_dispatches() - picking
+            if closed:
+                aviso = (
+                    "Este despacho se creó aparte: el despacho %s de la misma cita ya está %s, "
+                    "así que el backorder no pudo agregarse a él. La cita queda en dos despachos."
+                ) % (closed[0].name, CLOSED_STATE_LABELS[closed[0].state])
+                picking.message_post(body=aviso)
+                self.env['wmds.log'].sudo().create({
+                    'pick': picking.id,
+                    'log': aviso,
+                    'user': self.env.user.id,
+                })
+
+        first_pful = pful_pick[0]
+        if first_pful.marketplace_location:
+            loc = first_pful.marketplace_location
+            changed = picking.marketplace_location != loc
+            if changed:
+                picking.write({'marketplace_location': loc.id, 'location_dest_id': loc.id})
+            # También los movimientos recién asignados deben apuntar al marketplace.
+            picking.move_ids.sudo().write({'location_dest_id': loc.id})
+            if changed:
+                self.env['wmds.log'].sudo().create({
+                    'pick': picking.id,
+                    'log': f"Marketplace vinculado desde PFUL: {loc.complete_name}",
+                    'user': self.env.user.id,
+                })
+        elif picking.location_dest_id:
+            first_pful.sudo().write({'marketplace_location': picking.location_dest_id.id})
