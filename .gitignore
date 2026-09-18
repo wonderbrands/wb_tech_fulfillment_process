@@ -1,10 +1,6 @@
-# Ignorar carpetas de caché de Python
+
 __pycache__/
+
 *.pyc
-*.pyo
-*.pyd
 
-# Ignorar configuraciones locales de PyCharm
-.idea/
-
-# Ignorar archivos temporales o de configuración loca
+.DS_Store
